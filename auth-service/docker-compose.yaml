@@ -1,0 +1,76 @@
+services:
+  sqlite-db:
+    image: alpine:latest
+    container_name: kma_sqlite_server
+    restart: unless-stopped
+    volumes:
+      - ./db_data:/db
+    working_dir: /db
+    stdin_open: true
+    tty: true
+    command: >
+      /bin/sh -c "
+      apk add --no-cache sqlite &&
+      touch /db/kma.sqlite &&
+      tail -f /dev/null"
+    networks:
+      - kma_network
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kma_backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./db_data:/app/db_data
+    depends_on:
+      - sqlite-db
+    networks:
+      - kma_network
+
+  # ── Auth service ──────────────────────────────────────────────────
+  # Deliberately its own container, own image, own sqlite file — it
+  # can be redeployed, restarted, or have its DB backed up/rotated
+  # independently of the business-data backend above. The two only
+  # ever talk over the internal /internal/validate call, gated by
+  # AUTH_INTERNAL_KEY (see auth-service/.env.example).
+  auth-db:
+    image: alpine:latest
+    container_name: kma_auth_sqlite_server
+    restart: unless-stopped
+    volumes:
+      - ./auth_db_data:/db
+    working_dir: /db
+    stdin_open: true
+    tty: true
+    command: >
+      /bin/sh -c "
+      apk add --no-cache sqlite &&
+      touch /db/auth.sqlite &&
+      tail -f /dev/null"
+    networks:
+      - kma_network
+
+  auth-backend:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: kma_auth_backend
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./auth_db_data:/app/db_data
+    depends_on:
+      - auth-db
+    env_file:
+      - ./auth-service/.env
+    networks:
+      - kma_network
+
+networks:
+  kma_network:
+    name: kma_network
