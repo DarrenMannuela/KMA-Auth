@@ -78,6 +78,29 @@ frontend/
   wildcard origins on credentialed requests anyway, so this is also
   simply required, not just safer).
 
+## Topology: three independent stacks, one shared network
+
+This mirrors how you're already running things — a separate
+`docker-compose.yaml` per service, joined by one external Docker
+network (`kma_network`) rather than one giant merged compose file:
+
+- **backend stack** (yours, unchanged) — creates `kma_network`
+- **frontend stack** (yours, unchanged) — joins it with `external: true`
+- **auth stack** (new, in `auth-service/`) — also joins with
+  `external: true`; it must NOT try to create the network too, or you
+  get ownership conflicts with the backend stack that already does.
+
+The browser never talks to the auth service directly. `nginx.conf`
+gets a new `/auth/` location that proxies to `kma_auth_backend:8001`
+over the internal network — same pattern as the existing `/api/` and
+`/uploads/` locations. That's deliberate: it makes the auth API
+same-origin from the browser's point of view, so there's no CORS to
+configure and the session/CSRF cookies behave like any other
+same-origin cookie. `authApi.ts` defaults to calling `/auth` for
+exactly this reason — only override `VITE_AUTH_API_URL` if you're
+running the auth service standalone without nginx in front (e.g.
+local `go run .` during development).
+
 ## Setup
 
 1. **Auth service**
@@ -89,11 +112,20 @@ frontend/
                              # can only be generated with network access)
    go run .
    ```
-   Or via Docker — see the merged `docker-compose.yaml`, which adds
-   `auth-db` + `auth-backend` alongside your existing `sqlite-db` +
-   `backend` services.
+   Or via Docker, as its own stack alongside your existing two:
+   ```
+   cd auth-service
+   docker compose up -d --build
+   ```
+   This only works *after* your backend stack has already created
+   `kma_network` at least once — same requirement your frontend stack
+   already has.
 
-2. **Main backend** — copy `main-backend-integration/authguard.go` into
+2. **nginx** — copy the updated `nginx.conf` (adds the `/auth/`
+   location block) over your frontend's existing one and rebuild that
+   container.
+
+3. **Main backend** — copy `main-backend-integration/authguard.go` into
    your existing project (adjust the package declaration to match your
    middleware package), set `AUTH_SERVICE_URL` and `AUTH_INTERNAL_KEY`
    (same value as the auth service's), then wrap the routes that
@@ -107,7 +139,7 @@ frontend/
    }
    ```
 
-3. **Frontend**
+4. **Frontend**
    ```
    cd frontend   # or wherever your existing React app lives — these
                  # files are meant to be copied in, not run standalone

@@ -1,0 +1,48 @@
+services:
+  auth-db:
+    image: alpine:latest
+    container_name: kma_auth_sqlite_server
+    restart: unless-stopped
+    volumes:
+      - ./auth_db_data:/db
+    working_dir: /db
+    stdin_open: true
+    tty: true
+    command: >
+      /bin/sh -c "
+      apk add --no-cache sqlite &&
+      touch /db/auth.sqlite &&
+      tail -f /dev/null"
+    networks:
+      - kma_network
+
+  auth-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kma_auth_backend
+    restart: unless-stopped
+    # Not published to the host by default — nginx reaches this
+    # container over the internal kma_network via its container name
+    # (see nginx.conf's /auth/ location), so the browser never talks
+    # to :8001 directly. Uncomment below only if you need to hit it
+    # straight from your machine for local debugging.
+    # ports:
+    #   - "8001:8001"
+    volumes:
+      - ./auth_db_data:/app/db_data
+    depends_on:
+      - auth-db
+    env_file:
+      - ./.env
+    networks:
+      - kma_network
+
+networks:
+  # This stack does NOT own the network — your backend stack's
+  # docker-compose.yaml already creates kma_network. Every other
+  # stack (frontend, and now this one) just joins it, same as your
+  # existing frontend compose file already does.
+  kma_network:
+    external: true
+    name: kma_network
