@@ -1,0 +1,5 @@
+# Runs daily at 2:00 AM (container's local time, which is UTC by default
+# — see the docker-compose TZ note). Because RETENTION_DAYS in backup.sh
+# defaults to 30, this effectively also gives you ~4 weekly restore points
+# plus a month of daily granularity, without needing a separate weekly job.
+0 2 * * * /backup.sh >> /backups/backup.log 2>&1

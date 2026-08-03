@@ -38,6 +38,35 @@ services:
     networks:
       - kma_network
 
+  auth-backup:
+    image: alpine:latest
+    container_name: kma_auth_backup
+    restart: unless-stopped
+    # Same backup.sh as the main kma stack — copy that file (and
+    # crontab) into this project's ./backup folder too. Read-only mount
+    # on the source DB for the same reason as the main stack: this
+    # container should never be able to write into auth_db_data.
+    volumes:
+      - ./auth_db_data:/db:ro
+      - ./auth_backups:/backups
+      - ./backup/backup.sh:/backup.sh:ro
+      - ./backup/crontab:/etc/crontabs/root:ro
+    environment:
+      DB_FILENAME: "auth.sqlite"
+      BACKUP_PREFIX: "auth"
+      # Losing this DB means nobody can log in at all — a stricter
+      # retention than the main data stack isn't really warranted, but
+      # feel free to raise this if you want more restore points.
+      BACKUP_RETENTION_DAYS: "30"
+    command: >
+      /bin/sh -c "
+      apk add --no-cache sqlite dcron &&
+      chmod +x /backup.sh &&
+      /backup.sh &&
+      crond -f -l 2"
+    networks:
+      - kma_network
+
 networks:
   # This stack does NOT own the network — your backend stack's
   # docker-compose.yaml already creates kma_network. Every other
