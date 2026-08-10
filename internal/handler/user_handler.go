@@ -87,3 +87,23 @@ func (h *AuthHandler) DeactivateUser(c *gin.Context) {
 	h.DB.Where("user_id = ?", id).Delete(&dto.Session{})
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
+
+// ReactivateUser undoes a deactivation. It also clears any leftover
+// failed-attempt count and lockout from before the account was
+// deactivated — those don't apply to a fresh return to service, and
+// leaving a stale locked_until in place could lock the person out
+// again for no reason the admin (or the user) can see. It does not
+// create a session; the user still logs in normally afterward.
+func (h *AuthHandler) ReactivateUser(c *gin.Context) {
+	id := c.Param("id")
+	err := h.DB.Model(&dto.User{}).Where("id = ?", id).Updates(map[string]interface{}{
+		"active":          true,
+		"failed_attempts": 0,
+		"locked_until":    nil,
+	}).Error
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not reactivate user"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}

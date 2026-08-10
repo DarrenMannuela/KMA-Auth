@@ -59,6 +59,7 @@ func main() {
 				admin.GET("", authHandler.ListUsers)
 				admin.POST("", mw.RequireCSRF(), authHandler.CreateUser)
 				admin.POST("/:id/deactivate", mw.RequireCSRF(), authHandler.DeactivateUser)
+				admin.POST("/:id/reactivate", mw.RequireCSRF(), authHandler.ReactivateUser)
 			}
 		}
 	}

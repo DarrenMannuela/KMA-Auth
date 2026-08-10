@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -69,13 +70,35 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	// Success — reset any failure count and issue a fresh session.
+	// Success — reset any failure count.
 	user.FailedAttempts = 0
 	user.LockedUntil = nil
 	h.DB.Model(&user).Select("FailedAttempts", "LockedUntil").Updates(map[string]interface{}{
 		"failed_attempts": 0,
 		"locked_until":    nil,
 	})
+
+	// One live session per account: if this user already has a
+	// session that hasn't hit its absolute or idle expiry, refuse the
+	// new login rather than silently creating a second session or
+	// kicking the old one. The password was already verified above,
+	// so a specific message here doesn't leak anything an attacker
+	// could use — it only reveals account state to someone who
+	// already has the correct password.
+	now := time.Now()
+	var existing dto.Session
+	err = h.DB.Where("user_id = ? AND expires_at > ? AND idle_expires_at > ?", user.ID, now, now).
+		First(&existing).Error
+	if err == nil {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "This account is already signed in on another device. Log out there, or wait for that session to expire, before signing in here.",
+		})
+		return
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not verify session state"})
+		return
+	}
 
 	session, rawToken, err := h.createSession(user.ID, c)
 	if err != nil {
@@ -214,9 +237,10 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 
 func publicUser(u dto.User) gin.H {
 	return gin.H{
-		"id":    u.ID,
-		"email": u.Email,
-		"name":  u.Name,
-		"role":  u.Role,
+		"id":     u.ID,
+		"email":  u.Email,
+		"name":   u.Name,
+		"role":   u.Role,
+		"active": u.Active,
 	}
 }
