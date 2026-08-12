@@ -13,6 +13,16 @@ type User struct {
 	Role         string `gorm:"default:staff" json:"role"` // e.g. admin, staff
 	Active       bool   `gorm:"default:true" json:"active"`
 
+	// True for accounts that still have an admin-set password (either
+	// just created, or reset by an admin) that the user themselves
+	// hasn't replaced yet. The frontend uses this to force a
+	// change-password step before letting them into the app shell.
+	// Cleared by ChangePassword on success. Defaults true so newly
+	// created accounts require a change; existing rows need a
+	// migration to backfill this to false, or they'll be forced
+	// through the flow too.
+	MustChangePassword bool `gorm:"default:true" json:"must_change_password"`
+
 	// Brute-force tracking lives on the user row (not just per-IP) so a
 	// distributed attempt against one account is still caught even if
 	// it comes from many different IPs.

@@ -16,6 +16,16 @@ import (
 func main() {
 	cfg := config.Load()
 
+	// Force release mode whenever cfg.IsProd is true, regardless of
+	// whether the GIN_MODE env var happens to be set correctly —
+	// debug mode logs full route tables and is chattier in general,
+	// which isn't something we want to depend on remembering to set
+	// via a separate env var. AUTH_ENV=production (already required
+	// for cfg.IsProd to be true) is the single source of truth now.
+	if cfg.IsProd {
+		gin.SetMode(gin.ReleaseMode)
+	}
+
 	db, err := database.Connect(cfg)
 	if err != nil {
 		log.Fatalf("[auth] failed to connect to database: %v", err)
@@ -65,9 +75,11 @@ func main() {
 	}
 
 	// Server-to-server only — never exposed to the frontend, gated by
-	// a shared secret instead of a session/CSRF cookie.
+	// a shared secret instead of a session/CSRF cookie. RateLimitInternal
+	// caps how fast this can be hit even if AUTH_INTERNAL_KEY ever
+	// leaks — the key itself has no throttling of its own.
 	internalGroup := r.Group("/internal")
-	internalGroup.Use(mw.RequireInternalKey(cfg))
+	internalGroup.Use(mw.RateLimitInternal(), mw.RequireInternalKey(cfg))
 	{
 		internalGroup.POST("/validate", authHandler.Validate)
 	}

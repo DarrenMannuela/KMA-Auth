@@ -48,12 +48,18 @@ func (h *AuthHandler) CreateUser(c *gin.Context) {
 		return
 	}
 
+	// MustChangePassword starts true here explicitly (rather than
+	// relying on the column default) — this is an admin-set password,
+	// so the new hire is forced through the change-password flow on
+	// their first login. See dto.User's comment for the flag's full
+	// meaning.
 	user := dto.User{
-		Email:        strings.ToLower(strings.TrimSpace(req.Email)),
-		Name:         req.Name,
-		PasswordHash: hash,
-		Role:         role,
-		Active:       true,
+		Email:              strings.ToLower(strings.TrimSpace(req.Email)),
+		Name:               req.Name,
+		PasswordHash:       hash,
+		Role:               role,
+		Active:             true,
+		MustChangePassword: true,
 	}
 	if err := h.DB.Create(&user).Error; err != nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "a user with that email already exists"})

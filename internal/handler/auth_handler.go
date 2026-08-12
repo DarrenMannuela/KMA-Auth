@@ -219,8 +219,9 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		return
 	}
 	h.DB.Model(&dto.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
-		"password_hash":       hash,
-		"password_changed_at": time.Now(),
+		"password_hash":        hash,
+		"password_changed_at":  time.Now(),
+		"must_change_password": false,
 	})
 
 	// Invalidate every session including this one — the new password
@@ -237,10 +238,11 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 
 func publicUser(u dto.User) gin.H {
 	return gin.H{
-		"id":     u.ID,
-		"email":  u.Email,
-		"name":   u.Name,
-		"role":   u.Role,
-		"active": u.Active,
+		"id":                   u.ID,
+		"email":                u.Email,
+		"name":                 u.Name,
+		"role":                 u.Role,
+		"active":               u.Active,
+		"must_change_password": u.MustChangePassword,
 	}
 }
