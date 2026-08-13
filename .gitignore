@@ -1,3 +1,15 @@
+/auth_db_data
+/auth_backups
 .env
 .env.*
 !.env.example
+
+# OS noise (you're on macOS)
+.DS_Store
+
+# Go build artifacts, in case you ever run `go build` locally rather
+# than only building inside Docker
+/bin/
+*.exe
+*.test
+*.out
