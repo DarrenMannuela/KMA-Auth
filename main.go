@@ -54,6 +54,14 @@ func main() {
 	v1 := r.Group("/api/v1/auth")
 	{
 		v1.POST("/login", mw.RateLimitAuth(), authHandler.Login)
+		// Public like /login, for the same reason — the person hitting
+		// this has no session yet (that's the entire point: it's how
+		// they get one for the first time). Reuses RateLimitAuth rather
+		// than a separate limiter — a token-guessing attempt against
+		// this endpoint is the same class of abuse (repeated auth-
+		// adjacent POSTs from one source) that RateLimitAuth already
+		// exists to slow down.
+		v1.POST("/accept-invite", mw.RateLimitAuth(), authHandler.AcceptInvite)
 
 		authed := v1.Group("")
 		authed.Use(mw.RequireSession(db, cfg))

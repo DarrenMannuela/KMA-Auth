@@ -26,7 +26,7 @@ func Connect(cfg config.Config) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	if err := db.AutoMigrate(&dto.User{}, &dto.Session{}); err != nil {
+	if err := db.AutoMigrate(&dto.User{}, &dto.Session{}, &dto.InviteToken{}); err != nil {
 		return nil, err
 	}
 
@@ -57,12 +57,12 @@ func bootstrapAdmin(db *gorm.DB, cfg config.Config) error {
 		return err
 	}
 	admin := dto.User{
-		Email:              cfg.BootstrapEmail,
-		PasswordHash:       hash,
-		Name:               "Administrator",
-		Role:               "admin",
-		Active:             true,
-		PasswordChangedAt:  time.Now(),
+		Email:             cfg.BootstrapEmail,
+		PasswordHash:      hash,
+		Name:              "Administrator",
+		Role:              "admin",
+		Active:            true,
+		PasswordChangedAt: time.Now(),
 	}
 	if err := db.Create(&admin).Error; err != nil {
 		return err
