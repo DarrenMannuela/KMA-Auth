@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -70,13 +71,18 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	// Success — reset any failure count.
+	// Success — reset any failure count. Best-effort: if this write
+	// fails, the login itself still proceeds (the password was already
+	// verified) — worst case a stale failed-attempt count lingers and
+	// is retried on the next successful login.
 	user.FailedAttempts = 0
 	user.LockedUntil = nil
-	h.DB.Model(&user).Select("FailedAttempts", "LockedUntil").Updates(map[string]interface{}{
+	if err := h.DB.Model(&user).Select("FailedAttempts", "LockedUntil").Updates(map[string]interface{}{
 		"failed_attempts": 0,
 		"locked_until":    nil,
-	})
+	}).Error; err != nil {
+		log.Printf("[auth] warning: failed to reset failed-attempt count for user %d: %v", user.ID, err)
+	}
 
 	// One live session per account: if this user already has a
 	// session that hasn't hit its absolute or idle expiry, refuse the
@@ -119,7 +125,12 @@ func (h *AuthHandler) registerFailedAttempt(user *dto.User) {
 		lockUntil := time.Now().Add(h.Cfg.LockoutDuration)
 		updates["locked_until"] = lockUntil
 	}
-	h.DB.Model(user).Updates(updates)
+	// Best-effort: a failure here just means this particular attempt
+	// isn't counted, not that the login itself fails — genericFail()
+	// still runs regardless in the caller.
+	if err := h.DB.Model(user).Updates(updates).Error; err != nil {
+		log.Printf("[auth] warning: failed to record failed login attempt for user %d: %v", user.ID, err)
+	}
 }
 
 func (h *AuthHandler) createSession(userID uint, c *gin.Context) (*dto.Session, string, error) {
@@ -152,12 +163,17 @@ func (h *AuthHandler) createSession(userID uint, c *gin.Context) (*dto.Session, 
 
 func (h *AuthHandler) setSessionCookies(c *gin.Context, rawToken, csrfSecret string, expires time.Time) {
 	maxAge := int(time.Until(expires).Seconds())
+	// Set once, before either SetCookie call below — gin applies
+	// whatever SameSite was last set on the context to every cookie
+	// written after it, so this one call covers both. Lax (not Strict)
+	// so the session survives a normal top-level navigation into the
+	// app from an external link/bookmark.
+	c.SetSameSite(http.SameSiteLaxMode)
 	// HttpOnly session cookie: never readable by JS, closing off the
 	// most common exfiltration path (XSS reading document.cookie).
 	c.SetCookie(mw.SessionCookieName, rawToken, maxAge, "/", h.Cfg.CookieDomain, h.Cfg.IsProd, true)
 	// CSRF cookie is deliberately readable by JS — the frontend reads
 	// it and echoes it back as a header; see middleware/csrf.go.
-	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(mw.CSRFCookieName, csrfSecret, maxAge, "/", h.Cfg.CookieDomain, h.Cfg.IsProd, false)
 }
 
@@ -166,10 +182,14 @@ func (h *AuthHandler) setSessionCookies(c *gin.Context, rawToken, csrfSecret str
 func (h *AuthHandler) Logout(c *gin.Context) {
 	sess := mw.CurrentSession(c)
 	if sess != nil {
-		h.DB.Delete(sess)
+		// Best-effort: even if the server-side delete fails, the
+		// cookies are still cleared below so this browser loses access
+		// immediately — the stale row just expires naturally later.
+		if err := h.DB.Delete(sess).Error; err != nil {
+			log.Printf("[auth] warning: failed to delete session %d on logout: %v", sess.ID, err)
+		}
 	}
-	c.SetCookie(mw.SessionCookieName, "", -1, "/", h.Cfg.CookieDomain, h.Cfg.IsProd, true)
-	c.SetCookie(mw.CSRFCookieName, "", -1, "/", h.Cfg.CookieDomain, h.Cfg.IsProd, false)
+	mw.ClearSessionCookies(c, h.Cfg)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -178,9 +198,11 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 // password change.
 func (h *AuthHandler) LogoutAll(c *gin.Context) {
 	user := mw.CurrentUser(c)
-	h.DB.Where("user_id = ?", user.ID).Delete(&dto.Session{})
-	c.SetCookie(mw.SessionCookieName, "", -1, "/", h.Cfg.CookieDomain, h.Cfg.IsProd, true)
-	c.SetCookie(mw.CSRFCookieName, "", -1, "/", h.Cfg.CookieDomain, h.Cfg.IsProd, false)
+	if err := h.DB.Where("user_id = ?", user.ID).Delete(&dto.Session{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not log out other sessions"})
+		return
+	}
+	mw.ClearSessionCookies(c, h.Cfg)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -218,20 +240,30 @@ func (h *AuthHandler) ChangePassword(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update password"})
 		return
 	}
-	h.DB.Model(&dto.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
+	if err := h.DB.Model(&dto.User{}).Where("id = ?", user.ID).Updates(map[string]interface{}{
 		"password_hash":        hash,
 		"password_changed_at":  time.Now(),
 		"must_change_password": false,
-	})
+	}).Error; err != nil {
+		// Do not report success or touch sessions below if the write
+		// itself failed — the caller would otherwise be told to log in
+		// again with a "new" password that was never actually saved.
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update password"})
+		return
+	}
 
 	// Invalidate every session including this one — the new password
 	// means the caller re-authenticates and gets a fresh session, and
 	// any other device/browser that had the old session gets kicked
 	// off too (important if the change was prompted by a suspected
-	// compromise).
-	h.DB.Where("user_id = ?", user.ID).Delete(&dto.Session{})
-	c.SetCookie(mw.SessionCookieName, "", -1, "/", h.Cfg.CookieDomain, h.Cfg.IsProd, true)
-	c.SetCookie(mw.CSRFCookieName, "", -1, "/", h.Cfg.CookieDomain, h.Cfg.IsProd, false)
+	// compromise). Best-effort: the password write above already
+	// succeeded, so a failure here doesn't change the response — worst
+	// case a stale session lingers until its own expiry rather than
+	// being revoked immediately.
+	if err := h.DB.Where("user_id = ?", user.ID).Delete(&dto.Session{}).Error; err != nil {
+		log.Printf("[auth] warning: failed to revoke sessions for user %d after password change: %v", user.ID, err)
+	}
+	mw.ClearSessionCookies(c, h.Cfg)
 
 	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "password changed, please log in again"})
 }

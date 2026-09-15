@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"log"
 	"net/http"
 	"time"
 
@@ -39,16 +40,20 @@ func RequireSession(db *gorm.DB, cfg config.Config) gin.HandlerFunc {
 
 		now := time.Now()
 		if now.After(sess.ExpiresAt) || now.After(sess.IdleExpiresAt) {
-			db.Delete(&sess)
-			clearSessionCookies(c, cfg)
+			if err := db.Delete(&sess).Error; err != nil {
+				log.Printf("[auth] warning: failed to delete expired session %d: %v", sess.ID, err)
+			}
+			ClearSessionCookies(c, cfg)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
 			return
 		}
 
 		var user dto.User
 		if err := db.First(&user, sess.UserID).Error; err != nil || !user.Active {
-			db.Delete(&sess)
-			clearSessionCookies(c, cfg)
+			if err := db.Delete(&sess).Error; err != nil {
+				log.Printf("[auth] warning: failed to delete session %d for invalid/inactive user: %v", sess.ID, err)
+			}
+			ClearSessionCookies(c, cfg)
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "session invalid"})
 			return
 		}
@@ -60,7 +65,13 @@ func RequireSession(db *gorm.DB, cfg config.Config) gin.HandlerFunc {
 			sess.IdleExpiresAt = sess.ExpiresAt
 		}
 		sess.LastSeenAt = now
-		db.Save(&sess)
+		// Best-effort: a failed refresh here just means the idle window
+		// doesn't get pushed out this request — the session is still
+		// valid against its last-saved expiry, so the request proceeds
+		// rather than failing a read because a housekeeping write failed.
+		if err := db.Save(&sess).Error; err != nil {
+			log.Printf("[auth] warning: failed to refresh session %d idle expiry: %v", sess.ID, err)
+		}
 
 		c.Set(ctxUserKey, user)
 		c.Set(ctxSessionKey, sess)
@@ -102,7 +113,17 @@ func CurrentSession(c *gin.Context) *dto.Session {
 	return &s
 }
 
-func clearSessionCookies(c *gin.Context, cfg config.Config) {
+// ClearSessionCookies expires both auth cookies. Exported so handlers
+// (Logout, LogoutAll, ChangePassword) can reuse the exact same
+// attributes this middleware uses when it clears cookies itself,
+// rather than each call site re-declaring them and risking drift.
+func ClearSessionCookies(c *gin.Context, cfg config.Config) {
+	// Explicit on every cookie this service sets/clears — see
+	// setSessionCookies in auth_handler.go for why Lax rather than
+	// Strict, and for why this must be set before the first SetCookie
+	// call in the request (gin applies whatever SameSite was set most
+	// recently on the context to every cookie written after it).
+	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie(SessionCookieName, "", -1, "/", cfg.CookieDomain, cfg.IsProd, true)
 	c.SetCookie(CSRFCookieName, "", -1, "/", cfg.CookieDomain, cfg.IsProd, false)
 }

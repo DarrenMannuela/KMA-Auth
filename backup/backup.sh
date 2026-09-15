@@ -11,11 +11,10 @@ BACKUP_PREFIX="${BACKUP_PREFIX:-kma}"
 
 DB_PATH="/db/${DB_FILENAME}"
 BACKUP_DIR="/backups"
-# How many days of daily backups to keep before pruning. Weekly retention
-# doesn't need a separate schedule — a Sunday backup just happens to be
-# the one that survives once older dailies age out, if you keep this at
-# 7+; bump to e.g. 90 for ~13 weeks of history at low disk cost (SQLite
-# backups compress well and this DB is small).
+# How many days of backups to keep before pruning. The crontab runs
+# this weekly (Sunday 2 AM), so the default of 30 keeps roughly the
+# last ~4 weekly backups; bump to e.g. 365 for a year of weekly history
+# at low disk cost (SQLite backups compress well and this DB is small).
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
 
 mkdir -p "$BACKUP_DIR"

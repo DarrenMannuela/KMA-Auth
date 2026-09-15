@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"log"
 	"net/http"
 	"time"
 
@@ -56,7 +57,14 @@ func (h *AuthHandler) Validate(c *gin.Context) {
 		sess.IdleExpiresAt = sess.ExpiresAt
 	}
 	sess.LastSeenAt = now
-	h.DB.Save(&sess)
+	// Best-effort: this endpoint is on the hot path for every request
+	// the main backend forwards, so a transient write failure here
+	// shouldn't fail validation for an otherwise-valid session — it
+	// just means the idle window isn't extended for this particular
+	// call.
+	if err := h.DB.Save(&sess).Error; err != nil {
+		log.Printf("[auth] warning: failed to refresh session %d idle expiry during validate: %v", sess.ID, err)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"valid": true,

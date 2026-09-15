@@ -42,6 +42,17 @@ services:
     image: alpine:latest
     container_name: kma_auth_backup
     restart: unless-stopped
+    # Alpine's busybox crond forks a child per job and that child calls
+    # setpgid() on itself — which fails with "Operation not permitted"
+    # when crond is running as the container's PID 1 (no real init
+    # process ever reaps/owns process groups the way a normal init
+    # would). That failure was killing crond immediately after start,
+    # which crashed this container's whole command and put it in a
+    # restart loop — taking a fresh ad-hoc backup on every restart
+    # instead of on the crontab's actual schedule. `init: true` gives the container
+    # a proper PID 1 (Docker's built-in tini) so crond runs as a normal
+    # child process instead.
+    init: true
     # Same backup.sh as the main kma stack — copy that file (and
     # crontab) into this project's ./backup folder too. Read-only mount
     # on the source DB for the same reason as the main stack: this
@@ -58,11 +69,16 @@ services:
       # retention than the main data stack isn't really warranted, but
       # feel free to raise this if you want more restore points.
       BACKUP_RETENTION_DAYS: "30"
+    # backup.sh is mounted :ro on purpose (this container should never
+    # be able to modify the script that runs against the DB) — invoked
+    # via `sh backup.sh` rather than executed directly, so it never
+    # needs its executable bit set. `chmod +x` here would fail outright
+    # on a read-only bind mount and crash-loop the container without
+    # ever taking a single backup.
     command: >
       /bin/sh -c "
       apk add --no-cache sqlite dcron &&
-      chmod +x /backup.sh &&
-      /backup.sh &&
+      sh /backup.sh &&
       crond -f -l 2"
     networks:
       - kma_network

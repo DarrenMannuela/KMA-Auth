@@ -2,10 +2,14 @@ package handler
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+
+	mw "github.com/DarrenMannuela/KMA-auth/internal/middleware"
 
 	"github.com/DarrenMannuela/KMA-auth/internal/dto"
 	"github.com/DarrenMannuela/KMA-auth/internal/mail"
@@ -212,7 +216,14 @@ func (h *AuthHandler) AcceptInvite(c *gin.Context) {
 	}
 
 	invite.UsedAt = &now
-	h.DB.Save(&invite)
+	if err := h.DB.Save(&invite).Error; err != nil {
+		// The password write above already succeeded — don't fail the
+		// request over this, but do log it: if this save keeps failing,
+		// the token stays "unused" and could in principle be replayed
+		// (it would just re-set the same password again, but it's worth
+		// flagging rather than silently swallowing).
+		log.Printf("[auth] warning: failed to mark invite token %d as used: %v", invite.ID, err)
+	}
 
 	// Straight into a real session — unlike ChangePassword (which
 	// revokes sessions because it's changing a password that was
@@ -243,16 +254,62 @@ func (h *AuthHandler) ListUsers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"users": out})
 }
 
+// DeactivateUser flips a user's Active flag off and immediately
+// revokes every session they hold. Refuses two cases before touching
+// anything: an admin deactivating their own account (which would end
+// their own session mid-request with no way to undo it from the UI),
+// and deactivating the last remaining active admin (which would leave
+// no admin account able to reverse the change at all).
 func (h *AuthHandler) DeactivateUser(c *gin.Context) {
-	id := c.Param("id")
-	if err := h.DB.Model(&dto.User{}).Where("id = ?", id).Update("active", false).Error; err != nil {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+		return
+	}
+
+	actor := mw.CurrentUser(c)
+	if actor != nil && uint64(actor.ID) == id {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot deactivate your own account"})
+		return
+	}
+
+	var target dto.User
+	if err := h.DB.First(&target, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not look up user"})
+		return
+	}
+
+	if target.Role == "admin" && target.Active {
+		var otherActiveAdmins int64
+		if err := h.DB.Model(&dto.User{}).
+			Where("role = ? AND active = ? AND id != ?", "admin", true, target.ID).
+			Count(&otherActiveAdmins).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not verify remaining admins"})
+			return
+		}
+		if otherActiveAdmins == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot deactivate the last remaining admin"})
+			return
+		}
+	}
+
+	if err := h.DB.Model(&target).Update("active", false).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not deactivate user"})
 		return
 	}
 	// Kill every outstanding session for that user immediately — an
-	// admin deactivating an account expects it to lose access now,
-	// not whenever that user's sessions happen to expire.
-	h.DB.Where("user_id = ?", id).Delete(&dto.Session{})
+	// admin deactivating an account expects it to lose access now, not
+	// whenever that user's sessions happen to expire. Best-effort: the
+	// account is already deactivated at this point regardless, so a
+	// failure here just means an existing session lingers until its own
+	// natural expiry instead of being cut off instantly.
+	if err := h.DB.Where("user_id = ?", target.ID).Delete(&dto.Session{}).Error; err != nil {
+		log.Printf("[auth] warning: failed to revoke sessions for deactivated user %d: %v", target.ID, err)
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -263,14 +320,23 @@ func (h *AuthHandler) DeactivateUser(c *gin.Context) {
 // again for no reason the admin (or the user) can see. It does not
 // create a session; the user still logs in normally afterward.
 func (h *AuthHandler) ReactivateUser(c *gin.Context) {
-	id := c.Param("id")
-	err := h.DB.Model(&dto.User{}).Where("id = ?", id).Updates(map[string]interface{}{
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+		return
+	}
+
+	result := h.DB.Model(&dto.User{}).Where("id = ?", id).Updates(map[string]interface{}{
 		"active":          true,
 		"failed_attempts": 0,
 		"locked_until":    nil,
-	}).Error
-	if err != nil {
+	})
+	if result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not reactivate user"})
+		return
+	}
+	if result.RowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
