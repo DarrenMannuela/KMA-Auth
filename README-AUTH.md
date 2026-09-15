@@ -1,5 +1,7 @@
 # KMA Auth Service
 
+*Detailed companion to [README.md](README.md) — start there for the quick setup, come back here for the design decisions and full API.*
+
 A standalone Go service that owns login, sessions, and nothing else.
 It doesn't know about orders, clients, or any business data — its only
 job is: "who is this cookie, and is it still valid?"
