@@ -193,6 +193,33 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// closingGrace is how long a session lives on after its tab reports that
+// it's closing. Long enough for a reload to come back and use it again
+// (which slides the idle expiry back out), or for another KMA tab that's
+// still open to (the frontend's src/utils/tabSession.ts has them do that);
+// short enough that closing KMA really ends the session — and, since an
+// account may only have one live session, frees it to sign in elsewhere
+// within seconds rather than after the idle timeout.
+const closingGrace = 20 * time.Second
+
+// Closing is called by the frontend as a KMA tab closes. A page can't
+// tell a close from a reload, so this doesn't end the session outright
+// (that would log people out on every reload): it brings the idle expiry
+// in to closingGrace from now, and any use of the session after that —
+// the reloaded page, or another open tab — slides it back out as usual.
+func (h *AuthHandler) Closing(c *gin.Context) {
+	sess := mw.CurrentSession(c)
+	if sess != nil {
+		soon := time.Now().Add(closingGrace)
+		if soon.Before(sess.IdleExpiresAt) {
+			if err := h.DB.Model(&dto.Session{}).Where("id = ?", sess.ID).Update("idle_expires_at", soon).Error; err != nil {
+				log.Printf("[auth] warning: failed to shorten closing session %d: %v", sess.ID, err)
+			}
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 // LogoutAll revokes every session for the current user — the
 // "log out everywhere" button, also useful to call right after a
 // password change.

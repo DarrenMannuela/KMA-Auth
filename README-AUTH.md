@@ -195,6 +195,7 @@ require the session's user to have `role: admin`.
 | POST   | `/accept-invite`          | none        | sets password from an emailed invite token, starts a session |
 | GET    | `/me`                     | session     | |
 | POST   | `/logout`                 | session     | |
+| POST   | `/closing`                | session     | sent by a tab as it closes: the session ends 20s later unless it's used again (see below) |
 | POST   | `/logout-all`             | session     | revokes every session for this user |
 | POST   | `/change-password`        | session     | revokes every session for this user, including the current one |
 | GET    | `/users`                  | admin       | |
@@ -209,6 +210,21 @@ under `/api/v1/auth`), gated by `X-Internal-Key` instead of a session —
 it's how `kma_backend` asks "is this cookie currently valid, and who is
 it?" without sharing this service's database. See
 `main-backend-integration/authguard.go`.
+
+## Closing KMA logs you out
+
+Closing the last KMA tab or window (or the browser, or the installed
+app) ends the session; closing one of several KMA tabs, or reloading,
+doesn't. A page can't tell a close from a reload, so as a tab goes away
+the frontend sends `POST /closing`, which brings the session's idle
+expiry in to 20 seconds (`closingGrace` in `auth_handler.go`) rather
+than ending it. A reload, or another KMA tab that's still open, uses the
+session again within those seconds and it carries on as usual; after a
+real close nothing does, and it ends. That also frees the account to
+sign in on another device straight away (one live session per account)
+instead of after the idle timeout. When a close goes unreported (a phone
+app swiped away), the frontend ends the leftover session the next time
+KMA is opened. The frontend's side is `src/utils/tabSession.ts`.
 
 ## Creating users
 

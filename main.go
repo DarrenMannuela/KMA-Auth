@@ -73,6 +73,9 @@ func main() {
 		{
 			authed.GET("/me", authHandler.Me)
 			authed.POST("/logout", mw.RequireCSRF(), authHandler.Logout)
+			// Sent by a tab as it closes (see Closing for why it doesn't
+			// just log out).
+			authed.POST("/closing", mw.RequireCSRF(), authHandler.Closing)
 			authed.POST("/logout-all", mw.RequireCSRF(), authHandler.LogoutAll)
 			authed.POST("/change-password", mw.RequireCSRF(), authHandler.ChangePassword)
 
