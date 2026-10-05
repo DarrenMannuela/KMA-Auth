@@ -1,5 +1,6 @@
-# Runs weekly, Sunday at 2:00 AM (container's local time, which is UTC
-# by default — see the docker-compose TZ note). RETENTION_DAYS in
-# backup.sh defaults to 30, so at a weekly cadence that keeps roughly
-# the last ~4 backups before pruning.
-0 2 * * 0 sh /backup.sh >> /backups/backup.log 2>&1
+# Every hour, take a backup if the newest one is BACKUP_EVERY_DAYS (7)
+# days old or more. Checking hourly rather than firing once a week means
+# a week whose planned time the Mac slept through still gets its backup,
+# within the hour of the Mac being back. Output goes to the container's
+# log: docker logs kma_auth_backup.
+17 * * * * sh /backup.sh due > /proc/1/fd/1 2>&1

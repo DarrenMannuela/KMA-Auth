@@ -1,15 +1,45 @@
+# ── Account data — never in the repository ───────────────────────────
+# The auth database holds every user's email and password hash, and
+# session tokens. The repository is public: anything committed here can
+# be read by anyone, and stays in its history even after it's deleted.
 /auth_db_data
 /auth_backups
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.db
+*.dump
+*.bak
+*.bad
+
+# ── Secrets ──────────────────────────────────────────────────────────
+# AUTH_INTERNAL_KEY, the bootstrap admin password and the Gmail app
+# password all live in .env.
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+.netrc
+.npmrc
 
-# OS noise (you're on macOS)
-.DS_Store
-
+# ── Builds and logs ──────────────────────────────────────────────────
 # Go build artifacts, in case you ever run `go build` locally rather
 # than only building inside Docker
+/kma-auth-server
 /bin/
 *.exe
 *.test
 *.out
+*.log
+
+# OS noise (you're on macOS)
+.DS_Store

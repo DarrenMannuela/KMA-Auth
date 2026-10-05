@@ -17,3 +17,13 @@ existing `kma_backend` + frontend, and how backups work.
 
 See **[AuthRotate.md](AuthRotate.md)** for the runbook on rotating
 `AUTH_INTERNAL_KEY`.
+
+In Docker (after the KMA stack, which creates `kma_network`):
+```
+docker compose up -d --build   # first start
+./update.sh                    # after a code change: backs up first
+```
+Backups, restores and keeping it running are in
+[README-AUTH.md](README-AUTH.md#backups). This repository is public:
+never commit `.env` or anything under `auth_db_data/` or
+`auth_backups/` (see [README-AUTH.md](README-AUTH.md#the-repository-is-public)).

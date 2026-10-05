@@ -31,7 +31,10 @@ internal/handler/                login/logout/me/change-password/users/validate
 Dockerfile
 .env.example                    copy to .env and fill in real values
 docker-compose.yaml             auth-db, auth-backend, auth-backup services
-backup/                         backup.sh + crontab, used by the auth-backup service
+backup/                         backup.sh + crontab, used by the auth-backup service;
+                                restore.sh to put a backup back; Dockerfile of the
+                                small image (sqlite3, cron) those containers run on
+update.sh                       back up, then rebuild and restart this stack
 
 main-backend-integration/
   authguard.go                  drop into your EXISTING kma_backend, adjusted
@@ -43,6 +46,21 @@ main-backend-integration/
 
 AuthRotate.md                   runbook for rotating AUTH_INTERNAL_KEY
 ```
+
+## The repository is public
+
+Anything committed here can be read by anyone, including the history.
+`.gitignore` keeps out the database, backups, `.env` files, keys and
+certificates, and `.dockerignore` keeps them out of image builds; check
+`git status` before every commit all the same.
+
+If a database or `.env` is ever committed by mistake, deleting it in a
+later commit isn't enough: it stays readable in the history. Treat what
+was in it as exposed: change the passwords of the accounts in it (bcrypt
+slows guessing down, but a weak or reused password can still be found
+offline) and rotate any key (see [AuthRotate.md](AuthRotate.md)).
+Removing it from the history takes `git filter-repo` and a force-push,
+and copies already downloaded stay out there.
 
 ## Security decisions, and why
 
@@ -91,6 +109,15 @@ AuthRotate.md                   runbook for rotating AUTH_INTERNAL_KEY
 - **CORS**: explicit origin allowlist, never `*` (browsers reject
   wildcard origins on credentialed requests anyway, so this is also
   simply required, not just safer).
+- **SQLite under load**: the database is opened in WAL mode with a 5s
+  busy timeout and immediate write transactions. Every API request the
+  main backend gets is checked here, and every check writes (it slides
+  the session's idle expiry), so a page load is a burst of concurrent
+  writes; this makes them wait their turn instead of failing with
+  "database is locked".
+- **Clean stops**: on SIGTERM (every Docker stop, restart and update) the
+  service stops taking requests, finishes the ones in progress (up to
+  20s), and closes the database. It used to be killed mid-request.
 
 ## Topology: three independent stacks, one shared network
 
@@ -202,15 +229,36 @@ admin the invite email couldn't be sent, so they know to follow up.
 
 ## Backups
 
-`docker-compose.yaml` includes an `auth-backup` service that takes a
-consistent `sqlite3 .backup` snapshot (safe against a live DB, unlike
-`cp`), gzips it into `./auth_backups/`, and prunes anything older than
-`BACKUP_RETENTION_DAYS` (default 30). It runs once immediately on
-container start, then on the schedule in `backup/crontab` — currently
-**weekly, Sunday 2:00 AM** container-local time (UTC by default).
+The `auth-backup` container backs up `auth.sqlite` into `./auth_backups/`
+every 7 days, with the same `backup.sh` as the main KMA stack (keep the
+two copies, and the crontab and Dockerfile, the same):
 
-Two non-obvious things preserved in that container's setup, in case
-either regresses again while editing it:
+- A live, WAL-safe `sqlite3 .backup` snapshot (safe against a live DB,
+  unlike `cp`), gzipped as `auth-<date>.sqlite.gz`. It must pass SQLite's
+  integrity check to count; one that fails is kept as
+  `…_FAILED-CHECK.bad`, nothing is pruned, and the failure shows in
+  `docker logs kma_auth_backup`.
+- Cron checks every hour and takes a backup when the newest is 7 days
+  old or more (and on start), so a Mac asleep at the planned time still
+  gets its weekly backup within the hour of waking. Jakarta time.
+- The newest 8 are kept, by count, never by age (`BACKUP_KEEP`,
+  `BACKUP_EVERY_DAYS` in `docker-compose.yaml`).
+- `BACKUP_COPY_DIR` in `.env` copies every backup to a second folder too
+  (an external drive or a synced folder). These files hold every user's
+  password hash: choose a folder only you can open.
+
+```bash
+docker exec kma_auth_backup sh /backup.sh                    # take a backup now
+docker logs kma_auth_backup                                  # when backups ran
+./backup/restore.sh auth_backups/auth-<date>.sqlite.gz       # put one back
+```
+
+`restore.sh` checks the backup, asks you to type `yes`, stops the auth
+service, moves the current database (with its `-wal`/`-shm` files) to
+`auth_db_data/before-restore-<date>/`, and starts the service again. A
+restore undoes every account and password change made since that backup.
+
+Things preserved in that container's setup, in case they regress:
 - `backup.sh` and `crontab` are bind-mounted `:ro` on purpose (this
   container should never modify the script that runs against the DB),
   so they're invoked via `sh /backup.sh` rather than executed directly
@@ -220,15 +268,33 @@ either regresses again while editing it:
   real init process as PID 1, BusyBox `crond`'s per-job `setpgid()`
   call fails with "Operation not permitted" and kills `crond`
   immediately after start.
+- Cron starts jobs with an empty environment, so the container saves its
+  settings (`DB_FILENAME=auth.sqlite`, `BACKUP_PREFIX=auth`, ...) to
+  `/run/backup.env` at start and `backup.sh` reads them back. Before
+  that, a scheduled run would have looked for `kma.sqlite` and failed.
+- The database folder is mounted read-write, though the backup only
+  reads: after the service stops cleanly SQLite has removed its
+  `-wal`/`-shm` files, and opening the database then has to create them.
+- `sqlite3`, `dcron` and `tzdata` are built into the image instead of
+  installed at every start, which needed the internet.
 
-To restore: `gunzip` the backup you want and point `AUTH_DB_PATH` (or
-the `auth_db_data` volume) at it while the service is stopped.
+## Running it
+
+The three KMA stacks start in order: KMA (it creates `kma_network`),
+then this one, then KMA-Frontend. After a code change, `./update.sh`
+takes a backup and then rebuilds and restarts this stack. Containers
+restart by themselves while Docker Desktop runs; turn on **Start Docker
+Desktop when you sign in** in its settings so that's also true after the
+Mac restarts. Docker checks the service's health every 30s (`/healthz`),
+and logs rotate (5 × 10 MB).
 
 ## What I'd still want before calling this production-ready
 
-- **HTTPS termination** (nginx/Caddy/Traefik/cloud LB) in front of
-  both services — `Secure` cookies require it, and none of this
-  protects credentials in transit over plain HTTP.
+- **HTTPS everywhere it's reached**: `tailscale serve` gives the
+  tailnet HTTPS, but the frontend's port 80 is also open on every network
+  the Mac is on (plain HTTP) unless KMA-Frontend's `KMA_WEB_BIND` is
+  `127.0.0.1`. A login over plain HTTP on shared Wi-Fi can be read in
+  transit.
 - **A real secrets manager** for `.env` values in production rather
   than a file on disk.
 - **Structured audit logging** of login/lockout/role-change/admin
@@ -241,7 +307,13 @@ the `auth_db_data` volume) at it while the service is stopped.
   your password with no admin around to re-invite you means no way
   back in short of direct DB access — only new accounts get the
   invite-link flow.
-- **Graceful shutdown and WAL mode**: `main.go` doesn't yet trap
-  SIGTERM to drain in-flight requests before exiting, and the sqlite
-  connection isn't opened with WAL mode — worth doing before running
-  this under any real concurrent load.
+- **Secure cookies**: the app is now served over HTTPS (through
+  `tailscale serve`), but `.env` still has `AUTH_ENV=development`, so the
+  cookies aren't marked `Secure`. Set `AUTH_ENV=production` and restart
+  to fix that; everyone then has to reach KMA by its `https://` address.
+- **Login rate limiting sees one address**: `SetTrustedProxies(nil)`
+  makes every login look like it comes from nginx, so all users share one
+  rate-limit bucket (a burst of 8, then one attempt per 12s). Fine for a
+  handful of staff; if logins ever get refused at busy moments, trust
+  the nginx/Docker network as a proxy so each person is counted by their
+  own address.

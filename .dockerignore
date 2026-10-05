@@ -1,0 +1,12 @@
+# Kept out of the image build. The build only needs the Go source;
+# everything else here is account data or secrets (the users' password
+# hashes, the internal key), which would otherwise be sent to Docker on
+# every build and kept in its build cache.
+.env
+.env.*
+auth_db_data
+auth_backups
+*.sqlite
+*.sqlite-*
+.git
+.DS_Store

@@ -13,7 +13,7 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux go build -o kma-auth-server .
 
 # ── Stage 2: Run ─────────────────────────────────────────────────────────────
-FROM alpine:latest AS runner
+FROM alpine:3.24 AS runner
 
 RUN apk add --no-cache sqlite-libs
 
