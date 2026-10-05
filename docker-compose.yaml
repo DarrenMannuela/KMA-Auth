@@ -1,18 +1,30 @@
+# Logs rotate: 5 files of 10 MB per container, so months of running never
+# fill the disk (Docker's default keeps every line forever).
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   auth-db:
-    image: alpine:latest
+    # Not a database server — SQLite is a file the auth service opens
+    # itself. This container only keeps a sqlite3 shell handy:
+    # docker exec -it kma_auth_sqlite_server sqlite3 auth.sqlite
+    build: ./backup
+    image: kma-auth-sqlite-tools
     container_name: kma_auth_sqlite_server
     restart: unless-stopped
+    # Without an init, `tail` as PID 1 ignores Docker's stop signal and
+    # every stop waited 10s and then killed it (exit 137).
+    init: true
     volumes:
       - ./auth_db_data:/db
     working_dir: /db
     stdin_open: true
     tty: true
-    command: >
-      /bin/sh -c "
-      apk add --no-cache sqlite &&
-      touch /db/auth.sqlite &&
-      tail -f /dev/null"
+    command: sh -c "touch /db/auth.sqlite && exec tail -f /dev/null"
+    logging: *logging
     networks:
       - kma_network
 
@@ -35,11 +47,22 @@ services:
       - auth-db
     env_file:
       - ./.env
+    # The service finishes the requests in progress when it's stopped
+    # (see main.go); this is how long Docker waits for that.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8001/healthz >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging: *logging
     networks:
       - kma_network
 
   auth-backup:
-    image: alpine:latest
+    build: ./backup
+    image: kma-auth-sqlite-tools
     container_name: kma_auth_backup
     restart: unless-stopped
     # Alpine's busybox crond forks a child per job and that child calls
@@ -53,33 +76,50 @@ services:
     # a proper PID 1 (Docker's built-in tini) so crond runs as a normal
     # child process instead.
     init: true
-    # Same backup.sh as the main kma stack — copy that file (and
-    # crontab) into this project's ./backup folder too. Read-only mount
-    # on the source DB for the same reason as the main stack: this
-    # container should never be able to write into auth_db_data.
+    # Same backup.sh as the main kma stack — keep the two copies (and
+    # the crontab and Dockerfile) the same.
     volumes:
-      - ./auth_db_data:/db:ro
+      # Read-write, though the backup only reads: once the auth service
+      # has stopped cleanly, SQLite has folded its -wal/-shm files away,
+      # and opening a WAL database then needs to create them again, which
+      # a read-only mount can't. With :ro, no backup could be taken while
+      # the auth service was down.
+      - ./auth_db_data:/db
       - ./auth_backups:/backups
+      # A second copy of every backup, off this disk if you can: set
+      # BACKUP_COPY_DIR in .env to an external drive or a synced folder.
+      # Empty: no copy (this then just mounts ./auth_backups a second
+      # time, unused).
+      - ${BACKUP_COPY_DIR:-./auth_backups}:/backups-copy
+      # Scripts mounted :ro on purpose: this container should never be
+      # able to modify the script that runs against the DB.
       - ./backup/backup.sh:/backup.sh:ro
       - ./backup/crontab:/etc/crontabs/root:ro
     environment:
+      TZ: Asia/Jakarta
       DB_FILENAME: "auth.sqlite"
       BACKUP_PREFIX: "auth"
-      # Losing this DB means nobody can log in at all — a stricter
-      # retention than the main data stack isn't really warranted, but
-      # feel free to raise this if you want more restore points.
-      BACKUP_RETENTION_DAYS: "30"
-    # backup.sh is mounted :ro on purpose (this container should never
-    # be able to modify the script that runs against the DB) — invoked
-    # via `sh backup.sh` rather than executed directly, so it never
-    # needs its executable bit set. `chmod +x` here would fail outright
-    # on a read-only bind mount and crash-loop the container without
-    # ever taking a single backup.
-    command: >
-      /bin/sh -c "
-      apk add --no-cache sqlite dcron &&
-      sh /backup.sh &&
-      crond -f -l 2"
+      # How many backups to keep, and how often to take one. Losing this
+      # DB means nobody can log in at all, so keep the copy below too.
+      BACKUP_KEEP: "8"
+      BACKUP_EVERY_DAYS: "7"
+      BACKUP_COPY: ${BACKUP_COPY_DIR:+on}
+    # backup.sh is invoked via `sh backup.sh` rather than executed
+    # directly, so it never needs its executable bit set (a chmod on the
+    # read-only mount would fail). On start: save the settings for cron
+    # (cron jobs get an empty environment: without this the scheduled
+    # run looked for kma.sqlite), take a backup if one is due, then hand
+    # over to cron, which checks every hour. A failed backup doesn't stop
+    # the container: cron tries again within the hour.
+    command: sh -c "export -p > /run/backup.env; sh /backup.sh due; exec crond -f -l 2"
+    # Shows as unhealthy in Docker Desktop when the newest good backup is
+    # more than 8 days old.
+    healthcheck:
+      test: ["CMD-SHELL", "find /backups -maxdepth 1 -name 'auth-[0-9]*.sqlite.gz' -mtime -8 | grep -q ."]
+      interval: 10m
+      timeout: 10s
+      start_period: 2m
+    logging: *logging
     networks:
       - kma_network
 

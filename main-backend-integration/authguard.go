@@ -79,6 +79,17 @@ func RequireAuth() gin.HandlerFunc {
 		}
 		defer resp.Body.Close()
 
+		// Only a 200 with valid=false means the session is dead. Any other
+		// status (429 while rate limited, 401/503 for a wrong or missing
+		// internal key) is about the auth service, not this user: answer
+		// 503, never 401, or the frontend logs everyone out over it. KMA's
+		// internal/middleware/auth.go is the maintained version of this
+		// guard, and also retries once while the auth service restarts.
+		if resp.StatusCode != http.StatusOK {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "auth service unavailable"})
+			return
+		}
+
 		var out validateResponse
 		if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || !out.Valid {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "session invalid"})

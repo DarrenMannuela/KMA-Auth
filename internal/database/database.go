@@ -21,7 +21,20 @@ var DB *gorm.DB
 // purpose: this service should be deployable/restartable/backed-up
 // independently of the business-data database.
 func Connect(cfg config.Config) (*gorm.DB, error) {
-	db, err := gorm.Open(sqlite.Open(cfg.DBPath+"?_foreign_keys=on"), &gorm.Config{})
+	// Every API request the main backend gets is checked here
+	// (/internal/validate), and each check also writes (it slides the
+	// session's idle expiry), so this file sees bursts of concurrent
+	// writes: a page load fires five or six at once.
+	//   - _journal_mode=WAL lets those checks read while another writes,
+	//     instead of readers and the writer blocking each other.
+	//   - _busy_timeout=5000 waits up to 5s for the write lock rather
+	//     than failing at once with "database is locked".
+	//   - _txlock=immediate takes the write lock when a write transaction
+	//     starts, so two of them can't both read first and then deadlock
+	//     trying to upgrade (SQLite fails one of those at once, without
+	//     waiting out the busy timeout).
+	// Same reasoning as the main backend's Connect().
+	db, err := gorm.Open(sqlite.Open(cfg.DBPath+"?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000&_txlock=immediate"), &gorm.Config{})
 	if err != nil {
 		return nil, err
 	}

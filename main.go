@@ -1,8 +1,13 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/DarrenMannuela/KMA-auth/internal/config"
@@ -96,10 +101,41 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"ok": true})
 	})
 
-	log.Printf("[auth] listening on :%s (env=%s)", cfg.Port, envLabel(cfg))
-	if err := r.Run(":" + cfg.Port); err != nil {
-		log.Fatalf("[auth] server failed: %v", err)
+	// An http.Server rather than r.Run, so a stop can be graceful:
+	// Docker sends SIGTERM on every stop, restart and update, and before
+	// this the process was simply killed by it (exit code 2), cutting off
+	// a login or password change half way through. Now it stops taking
+	// new requests, lets the ones in flight finish (up to 20s; compose's
+	// stop_grace_period gives it 30s), then closes the database.
+	// ReadHeaderTimeout stops a client that never finishes sending its
+	// headers from holding a connection open forever.
+	srv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
+	stop, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("[auth] server failed: %v", err)
+		}
+	}()
+	log.Printf("[auth] listening on :%s (env=%s)", cfg.Port, envLabel(cfg))
+
+	<-stop.Done()
+	log.Println("[auth] stopping: finishing the requests in progress")
+	ctx, done := context.WithTimeout(context.Background(), 20*time.Second)
+	defer done()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("[auth] stopped before every request finished: %v", err)
+	}
+	if sqlDB, err := db.DB(); err == nil {
+		if err := sqlDB.Close(); err != nil {
+			log.Printf("[auth] closing the database: %v", err)
+		}
+	}
+	log.Println("[auth] stopped cleanly")
 }
 
 func envLabel(cfg config.Config) string {
