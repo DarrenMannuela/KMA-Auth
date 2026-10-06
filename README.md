@@ -23,6 +23,9 @@ In Docker (after the KMA stack, which creates `kma_network`):
 docker compose up -d --build   # first start
 ./update.sh                    # after a code change: backs up first
 ```
+`go test ./...` runs the tests. Dependencies are checked with
+`GOTOOLCHAIN=go1.25.14 go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...`.
+
 Backups, restores and keeping it running are in
 [README-AUTH.md](README-AUTH.md#backups). This repository is public:
 never commit `.env` or anything under `auth_db_data/` or

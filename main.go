@@ -126,6 +126,25 @@ func main() {
 	}()
 	log.Printf("[auth] listening on :%s (env=%s)", cfg.Port, envLabel(cfg))
 
+	// Clear out expired sessions and old invite links: once at start, then
+	// every hour, until the service stops.
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			if s, i, err := database.PruneExpired(db); err != nil {
+				log.Printf("[auth] warning: pruning expired sessions: %v", err)
+			} else if s+i > 0 {
+				log.Printf("[auth] pruned %d expired sessions and %d old invite links", s, i)
+			}
+			select {
+			case <-stop.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
 	<-stop.Done()
 	log.Println("[auth] stopping: finishing the requests in progress")
 	ctx, done := context.WithTimeout(context.Background(), 20*time.Second)

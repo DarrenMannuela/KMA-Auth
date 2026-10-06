@@ -115,6 +115,15 @@ and copies already downloaded stay out there.
   the session's idle expiry), so a page load is a burst of concurrent
   writes; this makes them wait their turn instead of failing with
   "database is locked".
+- **One session per account, with a way out**: a login while the account
+  is signed in elsewhere is refused (409), saying when that session ends
+  by itself, and the login page offers "Sign out the other device and sign
+  in here", which logs in again with `take_over: true`. That needs the
+  password, like any login, and is never silent; before it, a phone that
+  died signed in locked its owner out for hours.
+- **Housekeeping**: expired sessions, and invite links used or expired
+  more than 30 days ago, are deleted at start and every hour
+  (`database.PruneExpired`); nothing else ever removed them.
 - **Clean stops**: on SIGTERM (every Docker stop, restart and update) the
   service stops taking requests, finishes the ones in progress (up to
   20s), and closes the database. It used to be killed mid-request.
@@ -191,7 +200,7 @@ require the session's user to have `role: admin`.
 
 | Method | Path                      | Auth        | Notes |
 |--------|---------------------------|-------------|-------|
-| POST   | `/login`                  | none        | rate-limited |
+| POST   | `/login`                  | none        | rate-limited; `take_over: true` signs the account's other session out (see below) |
 | POST   | `/accept-invite`          | none        | sets password from an emailed invite token, starts a session |
 | GET    | `/me`                     | session     | |
 | POST   | `/logout`                 | session     | |
