@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -28,6 +29,9 @@ func NewAuthHandler(db *gorm.DB, cfg config.Config) *AuthHandler {
 type loginRequest struct {
 	Email    string `json:"email" binding:"required,email"`
 	Password string `json:"password" binding:"required"`
+	// TakeOver signs the account's other live session out, so this login
+	// can go ahead (see the one-session check in Login).
+	TakeOver bool `json:"take_over"`
 }
 
 // Login is intentionally generic in its failure responses — "invalid
@@ -91,13 +95,37 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	// so a specific message here doesn't leak anything an attacker
 	// could use — it only reveals account state to someone who
 	// already has the correct password.
+	//
+	// The person can then choose to sign the other device out
+	// (take_over): otherwise a phone that died or a browser left signed
+	// in elsewhere locks them out until that session expires, hours
+	// later. It's never silent — they're asked first — and it needs the
+	// password, which is all waiting out the expiry would need too.
 	now := time.Now()
 	var existing dto.Session
 	err = h.DB.Where("user_id = ? AND expires_at > ? AND idle_expires_at > ?", user.ID, now, now).
 		First(&existing).Error
+	if err == nil && req.TakeOver {
+		if err := h.DB.Where("user_id = ?", user.ID).Delete(&dto.Session{}).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not sign out the other device"})
+			return
+		}
+		log.Printf("[auth] user %d signed in and signed out their other session", user.ID)
+		err = gorm.ErrRecordNotFound // carry on as if there had been none
+	}
 	if err == nil {
+		// Say when the other session ends by itself, so whoever is locked
+		// out knows how long; it's the sooner of its two expiries. In
+		// minutes rather than a clock time: the server's clock zone isn't
+		// the reader's.
+		ends := existing.ExpiresAt
+		if existing.IdleExpiresAt.Before(ends) {
+			ends = existing.IdleExpiresAt
+		}
 		c.JSON(http.StatusConflict, gin.H{
-			"error": "This account is already signed in on another device. Log out there, or wait for that session to expire, before signing in here.",
+			"error":         "This account is already signed in on another device. Sign it out from here, log out there, or it signs out by itself " + untilText(time.Until(ends)) + ".",
+			"ends_at":       ends,
+			"can_take_over": true,
 		})
 		return
 	}
@@ -193,6 +221,33 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// closingGrace is how long a session lives on after its tab reports that
+// it's closing. Long enough for a reload to come back and use it again
+// (which slides the idle expiry back out), or for another KMA tab that's
+// still open to (the frontend's src/utils/tabSession.ts has them do that);
+// short enough that closing KMA really ends the session — and, since an
+// account may only have one live session, frees it to sign in elsewhere
+// within seconds rather than after the idle timeout.
+const closingGrace = 20 * time.Second
+
+// Closing is called by the frontend as a KMA tab closes. A page can't
+// tell a close from a reload, so this doesn't end the session outright
+// (that would log people out on every reload): it brings the idle expiry
+// in to closingGrace from now, and any use of the session after that —
+// the reloaded page, or another open tab — slides it back out as usual.
+func (h *AuthHandler) Closing(c *gin.Context) {
+	sess := mw.CurrentSession(c)
+	if sess != nil {
+		soon := time.Now().Add(closingGrace)
+		if soon.Before(sess.IdleExpiresAt) {
+			if err := h.DB.Model(&dto.Session{}).Where("id = ?", sess.ID).Update("idle_expires_at", soon).Error; err != nil {
+				log.Printf("[auth] warning: failed to shorten closing session %d: %v", sess.ID, err)
+			}
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 // LogoutAll revokes every session for the current user — the
 // "log out everywhere" button, also useful to call right after a
 // password change.
@@ -276,5 +331,18 @@ func publicUser(u dto.User) gin.H {
 		"role":                 u.Role,
 		"active":               u.Active,
 		"must_change_password": u.MustChangePassword,
+	}
+}
+
+// untilText says how long until something, roughly: "in about 5 minutes",
+// "in about 3 hours".
+func untilText(d time.Duration) string {
+	switch m := int(d.Round(time.Minute).Minutes()); {
+	case m <= 1:
+		return "in about a minute"
+	case m < 90:
+		return fmt.Sprintf("in about %d minutes", m)
+	default:
+		return fmt.Sprintf("in about %d hours", int(d.Round(time.Hour).Hours()))
 	}
 }

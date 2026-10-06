@@ -115,6 +115,15 @@ and copies already downloaded stay out there.
   the session's idle expiry), so a page load is a burst of concurrent
   writes; this makes them wait their turn instead of failing with
   "database is locked".
+- **One session per account, with a way out**: a login while the account
+  is signed in elsewhere is refused (409), saying when that session ends
+  by itself, and the login page offers "Sign out the other device and sign
+  in here", which logs in again with `take_over: true`. That needs the
+  password, like any login, and is never silent; before it, a phone that
+  died signed in locked its owner out for hours.
+- **Housekeeping**: expired sessions, and invite links used or expired
+  more than 30 days ago, are deleted at start and every hour
+  (`database.PruneExpired`); nothing else ever removed them.
 - **Clean stops**: on SIGTERM (every Docker stop, restart and update) the
   service stops taking requests, finishes the ones in progress (up to
   20s), and closes the database. It used to be killed mid-request.
@@ -191,10 +200,11 @@ require the session's user to have `role: admin`.
 
 | Method | Path                      | Auth        | Notes |
 |--------|---------------------------|-------------|-------|
-| POST   | `/login`                  | none        | rate-limited |
+| POST   | `/login`                  | none        | rate-limited; `take_over: true` signs the account's other session out (see below) |
 | POST   | `/accept-invite`          | none        | sets password from an emailed invite token, starts a session |
 | GET    | `/me`                     | session     | |
 | POST   | `/logout`                 | session     | |
+| POST   | `/closing`                | session     | sent by a tab as it closes: the session ends 20s later unless it's used again (see below) |
 | POST   | `/logout-all`             | session     | revokes every session for this user |
 | POST   | `/change-password`        | session     | revokes every session for this user, including the current one |
 | GET    | `/users`                  | admin       | |
@@ -209,6 +219,21 @@ under `/api/v1/auth`), gated by `X-Internal-Key` instead of a session —
 it's how `kma_backend` asks "is this cookie currently valid, and who is
 it?" without sharing this service's database. See
 `main-backend-integration/authguard.go`.
+
+## Closing KMA logs you out
+
+Closing the last KMA tab or window (or the browser, or the installed
+app) ends the session; closing one of several KMA tabs, or reloading,
+doesn't. A page can't tell a close from a reload, so as a tab goes away
+the frontend sends `POST /closing`, which brings the session's idle
+expiry in to 20 seconds (`closingGrace` in `auth_handler.go`) rather
+than ending it. A reload, or another KMA tab that's still open, uses the
+session again within those seconds and it carries on as usual; after a
+real close nothing does, and it ends. That also frees the account to
+sign in on another device straight away (one live session per account)
+instead of after the idle timeout. When a close goes unreported (a phone
+app swiped away), the frontend ends the leftover session the next time
+KMA is opened. The frontend's side is `src/utils/tabSession.ts`.
 
 ## Creating users
 

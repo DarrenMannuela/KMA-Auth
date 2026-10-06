@@ -83,3 +83,18 @@ func bootstrapAdmin(db *gorm.DB, cfg config.Config) error {
 	log.Printf("[auth] bootstrap admin created for %s — log in and change the password immediately.", cfg.BootstrapEmail)
 	return nil
 }
+
+// PruneExpired deletes sessions past either expiry, which can never be
+// used again (RequireSession and Validate refuse them, and only remove the
+// ones someone happens to present), and invite links used or expired more
+// than 30 days ago. Without it, both tables only ever grow.
+func PruneExpired(db *gorm.DB) (sessions, invites int64, err error) {
+	now := time.Now()
+	res := db.Where("expires_at < ? OR idle_expires_at < ?", now, now).Delete(&dto.Session{})
+	if res.Error != nil {
+		return 0, 0, res.Error
+	}
+	monthAgo := now.AddDate(0, 0, -30)
+	res2 := db.Where("expires_at < ? OR (used_at IS NOT NULL AND used_at < ?)", monthAgo, monthAgo).Delete(&dto.InviteToken{})
+	return res.RowsAffected, res2.RowsAffected, res2.Error
+}
