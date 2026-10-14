@@ -263,14 +263,35 @@ two copies, and the crontab and Dockerfile, the same):
   integrity check to count; one that fails is kept as
   `…_FAILED-CHECK.bad`, nothing is pruned, and the failure shows in
   `docker logs kma_auth_backup`.
-- Cron checks every hour and takes a backup when the newest is 7 days
-  old or more (and on start), so a Mac asleep at the planned time still
-  gets its weekly backup within the hour of waking. Jakarta time.
-- The newest 8 are kept, by count, never by age (`BACKUP_KEEP`,
-  `BACKUP_EVERY_DAYS` in `docker-compose.yaml`).
+- Cron checks every hour and takes a backup when the newest is
+  `BACKUP_EVERY_DAYS` old or more (default 7, and on start), so a Mac
+  asleep at the planned time still gets its backup within the hour of
+  waking. Jakarta time.
+- The newest 8 are kept, by count, never by age (`BACKUP_KEEP` in
+  `docker-compose.yaml`; `BACKUP_EVERY_DAYS` in `.env`):
+  ```bash
+  echo "BACKUP_EVERY_DAYS=1" >> .env   # daily instead of weekly, say
+  docker compose up -d --force-recreate auth-backup
+  ```
 - `BACKUP_COPY_DIR` in `.env` copies every backup to a second folder too
   (an external drive or a synced folder). These files hold every user's
   password hash: choose a folder only you can open.
+  ```bash
+  mkdir -p ~/Desktop/KMA-Backups/kma-auth   # or wherever the second copy should live
+  echo "BACKUP_COPY_DIR=$HOME/Desktop/KMA-Backups/kma-auth" >> .env
+  docker compose up -d --force-recreate auth-backup
+  docker exec kma_auth_backup sh /backup.sh   # take one now and confirm it copied
+  ls ~/Desktop/KMA-Backups/kma-auth
+  ```
+  For Google Drive instead of a plain folder: install Google Drive for
+  desktop, sign in, and set the folder you'll use to **"Mirror
+  files"** (not "Stream files" — a streamed file isn't always actually
+  present on disk, which a Docker bind mount needs). Then point
+  `BACKUP_COPY_DIR` at the mirrored path, typically
+  `~/Library/CloudStorage/GoogleDrive-<your-email>/My Drive/KMA-Backups/kma-auth`
+  — confirm the exact path with `ls ~/Library/CloudStorage/` once the
+  app's installed and signed in. Since these backups carry every
+  password hash, keep that Drive folder private (not a Shared Drive).
 
 ```bash
 docker exec kma_auth_backup sh /backup.sh                    # take a backup now
