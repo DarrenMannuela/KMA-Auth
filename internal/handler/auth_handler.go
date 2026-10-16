@@ -134,6 +134,22 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
+	// Password alone isn't enough for an account with 2FA on: hand back
+	// a short-lived pending-mfa cookie instead of a real session, and
+	// let MFALogin (totp_handler.go) finish the job once a code checks
+	// out. Checked here, after every other reason to refuse has already
+	// been ruled out, so a wrong password never reveals whether 2FA is
+	// even on for an account (same non-disclosure reasoning as
+	// genericFail above).
+	if user.TOTPEnabled {
+		if err := h.startPendingMFA(user.ID, c); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not start sign-in"})
+			return
+		}
+		c.JSON(http.StatusAccepted, gin.H{"mfa_required": true})
+		return
+	}
+
 	session, rawToken, err := h.createSession(user.ID, c)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not start session"})
@@ -144,6 +160,33 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"user": publicUser(user),
 	})
+}
+
+// startPendingMFA records that userID's password step just succeeded
+// and sets the matching kma_mfa_pending cookie — see MFALogin
+// (totp_handler.go) for how it's redeemed. Any earlier pending attempts
+// for this user are cleared first: only the most recent login attempt
+// should be redeemable, not every half-finished one from however far
+// back within the TTL.
+func (h *AuthHandler) startPendingMFA(userID uint, c *gin.Context) error {
+	if err := h.DB.Where("user_id = ?", userID).Delete(&dto.PendingMFA{}).Error; err != nil {
+		return err
+	}
+	rawToken, err := util.GenerateToken()
+	if err != nil {
+		return err
+	}
+	pending := dto.PendingMFA{
+		TokenHash: util.HashToken(rawToken),
+		UserID:    userID,
+		ExpiresAt: time.Now().Add(mfaPendingTTL),
+	}
+	if err := h.DB.Create(&pending).Error; err != nil {
+		return err
+	}
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(mfaPendingCookieName, rawToken, int(mfaPendingTTL.Seconds()), "/", h.Cfg.CookieDomain, h.Cfg.IsProd, true)
+	return nil
 }
 
 func (h *AuthHandler) registerFailedAttempt(user *dto.User) {
@@ -331,6 +374,7 @@ func publicUser(u dto.User) gin.H {
 		"role":                 u.Role,
 		"active":               u.Active,
 		"must_change_password": u.MustChangePassword,
+		"totp_enabled":         u.TOTPEnabled,
 	}
 }
 

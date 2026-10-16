@@ -36,6 +36,14 @@ func TestPruneExpiredKeepsWhatCanStillBeUsed(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	pendingMFAs := []dto.PendingMFA{
+		{TokenHash: "fresh", UserID: 1, ExpiresAt: now.Add(hour)},
+		{TokenHash: "stale", UserID: 1, ExpiresAt: now.Add(-hour)},
+	}
+	if err := db.Create(&pendingMFAs).Error; err != nil {
+		t.Fatal(err)
+	}
+
 	s, i, err := PruneExpired(db)
 	if err != nil {
 		t.Fatal(err)
@@ -52,5 +60,10 @@ func TestPruneExpiredKeepsWhatCanStillBeUsed(t *testing.T) {
 	db.Model(&dto.InviteToken{}).Order("token_hash").Pluck("token_hash", &left)
 	if len(left) != 2 || left[0] != "open" || left[1] != "used-today" {
 		t.Errorf("invites left: %v, want [open used-today]", left)
+	}
+	left = nil
+	db.Model(&dto.PendingMFA{}).Pluck("token_hash", &left)
+	if len(left) != 1 || left[0] != "fresh" {
+		t.Errorf("pending MFAs left: %v, want [fresh]", left)
 	}
 }

@@ -39,6 +39,9 @@ func main() {
 	if cfg.InternalKey == "" {
 		log.Println("[auth] WARNING: AUTH_INTERNAL_KEY is not set — the /internal/validate endpoint will refuse all requests until it is.")
 	}
+	if cfg.TOTPEncryptionKey == nil {
+		log.Println("[auth] WARNING: AUTH_TOTP_ENCRYPTION_KEY is not set (or isn't a 64-char hex string) — two-factor setup will refuse all requests until it is.")
+	}
 
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -67,6 +70,11 @@ func main() {
 		// adjacent POSTs from one source) that RateLimitAuth already
 		// exists to slow down.
 		v1.POST("/accept-invite", mw.RateLimitAuth(), authHandler.AcceptInvite)
+		// Login's second step for an account with 2FA on — same public,
+		// rate-limited treatment as /login and /accept-invite, and for
+		// the same brute-force reason it matters even more here: a
+		// 6-digit code is a much smaller space to guess than a password.
+		v1.POST("/totp/login", mw.RateLimitAuth(), authHandler.MFALogin)
 
 		authed := v1.Group("")
 		authed.Use(mw.RequireSession(db, cfg))
@@ -78,6 +86,12 @@ func main() {
 			authed.POST("/closing", mw.RequireCSRF(), authHandler.Closing)
 			authed.POST("/logout-all", mw.RequireCSRF(), authHandler.LogoutAll)
 			authed.POST("/change-password", mw.RequireCSRF(), authHandler.ChangePassword)
+
+			// A user's own 2FA device — distinct from /users below, which
+			// is an admin managing *other* accounts entirely.
+			authed.POST("/totp/setup", mw.RequireCSRF(), authHandler.SetupTOTP)
+			authed.POST("/totp/verify", mw.RequireCSRF(), authHandler.VerifyTOTP)
+			authed.POST("/totp/disable", mw.RequireCSRF(), authHandler.DisableTOTP)
 
 			admin := authed.Group("/users")
 			admin.Use(mw.RequireRole("admin"))

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"os"
 	"strconv"
 	"strings"
@@ -20,6 +21,14 @@ type Config struct {
 	InternalKey        string
 	BootstrapEmail     string
 	BootstrapPassword  string
+
+	// TOTPEncryptionKey decrypts/encrypts TOTP secrets at rest (see
+	// util.EncryptTOTPSecret) — raw bytes decoded from a 64-hex-char
+	// env var, same convention as InternalKey (openssl rand -hex 32).
+	// Deliberately never derived from anything already in the
+	// database (e.g. InternalKey itself), so a DB leak alone can't
+	// also unlock the secrets it contains.
+	TOTPEncryptionKey []byte
 
 	// ── Invite email (Gmail SMTP) ──────────────────────────────────────
 	// Used by CreateUser to send a "set your password" link instead of
@@ -57,6 +66,20 @@ func mustGetEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// decodeHexKey decodes a hex-encoded key env var, returning nil (not an
+// error — see TOTPEncryptionKey's own comment) if it's unset or doesn't
+// decode to exactly wantBytes.
+func decodeHexKey(hexValue string, wantBytes int) []byte {
+	if hexValue == "" {
+		return nil
+	}
+	raw, err := hex.DecodeString(hexValue)
+	if err != nil || len(raw) != wantBytes {
+		return nil
+	}
+	return raw
 }
 
 func envInt(key string, fallback int) int {
@@ -105,6 +128,10 @@ func Load() Config {
 		InternalKey:        os.Getenv("AUTH_INTERNAL_KEY"),
 		BootstrapEmail:     os.Getenv("AUTH_BOOTSTRAP_EMAIL"),
 		BootstrapPassword:  os.Getenv("AUTH_BOOTSTRAP_PASSWORD"),
+		// Left nil if AUTH_TOTP_ENCRYPTION_KEY is unset or malformed — the
+		// TOTP handlers check for that explicitly and refuse 2FA setup
+		// with a clear error rather than panicking deep inside AES-GCM.
+		TOTPEncryptionKey: decodeHexKey(os.Getenv("AUTH_TOTP_ENCRYPTION_KEY"), 32),
 
 		SMTPHost:        mustGetEnv("AUTH_SMTP_HOST", "smtp.gmail.com"),
 		SMTPPort:        mustGetEnv("AUTH_SMTP_PORT", "587"),

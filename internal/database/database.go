@@ -39,7 +39,7 @@ func Connect(cfg config.Config) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	if err := db.AutoMigrate(&dto.User{}, &dto.Session{}, &dto.InviteToken{}); err != nil {
+	if err := db.AutoMigrate(&dto.User{}, &dto.Session{}, &dto.InviteToken{}, &dto.PendingMFA{}, &dto.TOTPRecoveryCode{}); err != nil {
 		return nil, err
 	}
 
@@ -86,8 +86,9 @@ func bootstrapAdmin(db *gorm.DB, cfg config.Config) error {
 
 // PruneExpired deletes sessions past either expiry, which can never be
 // used again (RequireSession and Validate refuse them, and only remove the
-// ones someone happens to present), and invite links used or expired more
-// than 30 days ago. Without it, both tables only ever grow.
+// ones someone happens to present), invite links used or expired more
+// than 30 days ago, and pending-MFA rows past their few-minute window.
+// Without it, these tables only ever grow.
 func PruneExpired(db *gorm.DB) (sessions, invites int64, err error) {
 	now := time.Now()
 	res := db.Where("expires_at < ? OR idle_expires_at < ?", now, now).Delete(&dto.Session{})
@@ -96,5 +97,11 @@ func PruneExpired(db *gorm.DB) (sessions, invites int64, err error) {
 	}
 	monthAgo := now.AddDate(0, 0, -30)
 	res2 := db.Where("expires_at < ? OR (used_at IS NOT NULL AND used_at < ?)", monthAgo, monthAgo).Delete(&dto.InviteToken{})
-	return res.RowsAffected, res2.RowsAffected, res2.Error
+	if res2.Error != nil {
+		return res.RowsAffected, 0, res2.Error
+	}
+	if err := db.Where("expires_at < ?", now).Delete(&dto.PendingMFA{}).Error; err != nil {
+		return res.RowsAffected, res2.RowsAffected, err
+	}
+	return res.RowsAffected, res2.RowsAffected, nil
 }

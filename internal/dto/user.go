@@ -34,6 +34,20 @@ type User struct {
 	// implicitly by being deleted when it's bumped (see AuthHandler).
 	PasswordChangedAt time.Time `json:"-"`
 
+	// ── Two-factor (TOTP) ───────────────────────────────────────────
+	// TOTPSecret is encrypted at rest (see util.EncryptTOTPSecret) —
+	// unlike a password, it has to be reversible to check a code
+	// against it, so a one-way hash won't do; encrypting it means a
+	// stolen DB/backup file alone doesn't hand over working 2FA
+	// secrets the way a plaintext column would. TOTPEnabled is false
+	// until Verify confirms the user can actually produce a code from
+	// it — Setup alone only ever populates TOTPPendingSecret, so an
+	// abandoned setup can't silently turn into "enabled with a secret
+	// nobody's authenticator app actually has."
+	TOTPSecret        string `json:"-"`
+	TOTPPendingSecret string `json:"-"`
+	TOTPEnabled       bool   `gorm:"default:false" json:"totp_enabled"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
