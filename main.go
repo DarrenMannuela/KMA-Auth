@@ -47,12 +47,20 @@ func main() {
 	r.Use(gin.Recovery())
 	r.Use(requestLogger())
 
-	// Behind a reverse proxy (nginx/traefik/etc) in production, set
-	// this to that proxy's actual address instead of nil, or
-	// ClientIP()-based rate limiting can be spoofed via
-	// X-Forwarded-For. nil disables trusting any proxy headers, which
-	// is the safe default for direct/local exposure.
-	r.SetTrustedProxies(nil)
+	// Every real request reaches this service through nginx (see
+	// KMA-Frontend/nginx.conf's /auth/ location), which does set
+	// X-Forwarded-For/X-Real-IP correctly — but Gin only trusts those
+	// headers from addresses in this list; anything else falls back to
+	// the raw TCP peer address. cfg.TrustedProxies defaults to Docker's
+	// bridge-network pool (see config.go), which covers nginx's
+	// container. Getting this wrong in either direction is bad: nil
+	// (or an empty/wrong list) makes ClientIP() return nginx's own
+	// address for every request — identical for every real user AND
+	// any attacker, which silently turns the per-IP rate limiters
+	// below into one shared global bucket instead of a per-source cap.
+	if err := r.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+		log.Fatalf("[auth] invalid AUTH_TRUSTED_PROXIES: %v", err)
+	}
 
 	r.Use(corsMiddleware(cfg))
 	r.Use(securityHeaders())
@@ -85,13 +93,20 @@ func main() {
 			// just log out).
 			authed.POST("/closing", mw.RequireCSRF(), authHandler.Closing)
 			authed.POST("/logout-all", mw.RequireCSRF(), authHandler.LogoutAll)
-			authed.POST("/change-password", mw.RequireCSRF(), authHandler.ChangePassword)
+			// Rate-limited like /login: this one also checks the account's
+			// real password, so it's just as guessable a target even though
+			// it requires a live session to reach at all.
+			authed.POST("/change-password", mw.RateLimitAuth(), mw.RequireCSRF(), authHandler.ChangePassword)
 
 			// A user's own 2FA device — distinct from /users below, which
-			// is an admin managing *other* accounts entirely.
-			authed.POST("/totp/setup", mw.RequireCSRF(), authHandler.SetupTOTP)
-			authed.POST("/totp/verify", mw.RequireCSRF(), authHandler.VerifyTOTP)
-			authed.POST("/totp/disable", mw.RequireCSRF(), authHandler.DisableTOTP)
+			// is an admin managing *other* accounts entirely. All three are
+			// rate-limited: /verify confirms a 6-digit code against a
+			// pending secret (small guess space, same reasoning as
+			// /totp/login), and /setup and /disable both re-check the
+			// account's real password like /change-password above.
+			authed.POST("/totp/setup", mw.RateLimitAuth(), mw.RequireCSRF(), authHandler.SetupTOTP)
+			authed.POST("/totp/verify", mw.RateLimitAuth(), mw.RequireCSRF(), authHandler.VerifyTOTP)
+			authed.POST("/totp/disable", mw.RateLimitAuth(), mw.RequireCSRF(), authHandler.DisableTOTP)
 
 			admin := authed.Group("/users")
 			admin.Use(mw.RequireRole("admin"))
@@ -124,12 +139,20 @@ func main() {
 	// a login or password change half way through. Now it stops taking
 	// new requests, lets the ones in flight finish (up to 20s; compose's
 	// stop_grace_period gives it 30s), then closes the database.
-	// ReadHeaderTimeout stops a client that never finishes sending its
-	// headers from holding a connection open forever.
+	// ReadHeaderTimeout/ReadTimeout stop a client that never finishes
+	// sending its request from holding a connection open forever; both
+	// can be short since nothing here accepts file uploads. WriteTimeout
+	// is more generous — CreateUser's invite email is sent synchronously
+	// within the request, and a slow SMTP round-trip shouldn't trip a
+	// tight response deadline. IdleTimeout bounds how long a kept-alive
+	// connection sits open between requests.
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           r,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 	stop, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -141,20 +164,33 @@ func main() {
 	log.Printf("[auth] listening on :%s (env=%s)", cfg.Port, envLabel(cfg))
 
 	// Clear out expired sessions and old invite links: once at start, then
-	// every hour, until the service stops.
+	// every hour, until the service stops. gin.Recovery() only covers HTTP
+	// handlers, not this goroutine — prune has its own recover so one bad
+	// cycle logs and skips instead of taking the whole process down with
+	// it (it would otherwise, since an unrecovered panic in any goroutine
+	// crashes the entire program, not just that goroutine).
 	go func() {
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
-		for {
+		prune := func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[auth] recovered from panic while pruning: %v", r)
+				}
+			}()
 			if s, i, err := database.PruneExpired(db); err != nil {
 				log.Printf("[auth] warning: pruning expired sessions: %v", err)
 			} else if s+i > 0 {
 				log.Printf("[auth] pruned %d expired sessions and %d old invite links", s, i)
 			}
+		}
+		prune()
+		for {
 			select {
 			case <-stop.Done():
 				return
 			case <-ticker.C:
+				prune()
 			}
 		}
 	}()

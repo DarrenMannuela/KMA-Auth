@@ -14,6 +14,14 @@ type Config struct {
 	DBPath             string
 	CookieDomain       string
 	AllowedOrigins     []string
+	// IP/CIDR ranges allowed to set X-Forwarded-For/X-Real-IP and have
+	// Gin's ClientIP() believe them — see main.go's SetTrustedProxies
+	// call. Defaults to Docker's entire default bridge-network pool
+	// (172.16.0.0/12), not the specific subnet kma_network happens to
+	// have today, since that subnet is auto-assigned (not pinned in any
+	// docker-compose.yaml) and could land anywhere in that range if the
+	// network were ever recreated.
+	TrustedProxies     []string
 	SessionIdleTTL     time.Duration
 	SessionAbsoluteTTL time.Duration
 	MaxFailedAttempts  int
@@ -100,12 +108,19 @@ func Load() Config {
 		originList[i] = strings.TrimSpace(originList[i])
 	}
 
+	proxies := mustGetEnv("AUTH_TRUSTED_PROXIES", "172.16.0.0/12")
+	proxyList := strings.Split(proxies, ",")
+	for i := range proxyList {
+		proxyList[i] = strings.TrimSpace(proxyList[i])
+	}
+
 	cfg := Config{
 		Port:           mustGetEnv("AUTH_PORT", "8001"),
 		IsProd:         env == "production",
 		DBPath:         mustGetEnv("AUTH_DB_PATH", "./db_data/auth.sqlite"),
 		CookieDomain:   os.Getenv("AUTH_COOKIE_DOMAIN"),
 		AllowedOrigins: originList,
+		TrustedProxies: proxyList,
 		// Idle TTL still exists as its own knob (kicks someone out sooner
 		// if they go quiet), but with the absolute ceiling now at 6h,
 		// leaving idle at the old 12h default means idle never actually
