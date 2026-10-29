@@ -115,6 +115,7 @@ func main() {
 				admin.POST("", mw.RequireCSRF(), authHandler.CreateUser)
 				admin.POST("/:id/deactivate", mw.RequireCSRF(), authHandler.DeactivateUser)
 				admin.POST("/:id/reactivate", mw.RequireCSRF(), authHandler.ReactivateUser)
+				admin.DELETE("/:id", mw.RequireCSRF(), authHandler.DeleteUser)
 			}
 		}
 	}

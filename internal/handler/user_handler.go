@@ -313,6 +313,76 @@ func (h *AuthHandler) DeactivateUser(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// DeleteUser permanently removes a user account and everything this
+// service holds for it (sessions, pending 2FA challenges, TOTP recovery
+// codes, invite tokens) — unlike DeactivateUser, there's no undo.
+// Carries the same two guards as DeactivateUser, for the same reasons:
+// deleting your own account would end your own session mid-request
+// with no UI left to undo it, and deleting the last active admin would
+// leave nobody able to manage accounts at all.
+func (h *AuthHandler) DeleteUser(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
+		return
+	}
+
+	actor := mw.CurrentUser(c)
+	if actor != nil && uint64(actor.ID) == id {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete your own account"})
+		return
+	}
+
+	var target dto.User
+	if err := h.DB.First(&target, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not look up user"})
+		return
+	}
+
+	if target.Role == "admin" && target.Active {
+		var otherActiveAdmins int64
+		if err := h.DB.Model(&dto.User{}).
+			Where("role = ? AND active = ? AND id != ?", "admin", true, target.ID).
+			Count(&otherActiveAdmins).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not verify remaining admins"})
+			return
+		}
+		if otherActiveAdmins == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "cannot delete the last remaining admin"})
+			return
+		}
+	}
+
+	// No DB-level cascade is declared on these (plain indexed UserID
+	// columns, not GORM associations) — clear them explicitly, in one
+	// transaction with the user row itself, so a failure partway
+	// through doesn't leave orphaned rows pointing at a deleted user.
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", target.ID).Delete(&dto.Session{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("user_id = ?", target.ID).Delete(&dto.PendingMFA{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("user_id = ?", target.ID).Delete(&dto.TOTPRecoveryCode{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("user_id = ?", target.ID).Delete(&dto.InviteToken{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&target).Error
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not delete user"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 // ReactivateUser undoes a deactivation. It also clears any leftover
 // failed-attempt count and lockout from before the account was
 // deactivated — those don't apply to a fresh return to service, and
